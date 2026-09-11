@@ -78,21 +78,3 @@
 > - 首次使用会弹出蓝牙/定位权限申请，全部允许
 > - Android 12+ 需要在“设置→蓝牙”里开启“附近设备”权限
 > - 若你的蓝牙模块是 **HC-05 / HC-06** 等经典模块，本 App 同样适用（指令一致）
-
-## 工程结构
-
-```
-BluetoothCarController/
-├── settings.gradle / build.gradle / gradle.properties
-├── gradle/wrapper/                  # Gradle Wrapper（版本 8.7）
-├── firmware/esp32_car/esp32_car.ino # ESP32 小车固件（已适配）
-└── app/
-    ├── build.gradle                 # compileSdk 34, minSdk 21, 纯系统 API 无三方依赖
-    └── src/main/
-        ├── AndroidManifest.xml
-        ├── java/com/example/btcarcar/MainActivity.java   # 全部逻辑
-        └── res/
-            ├── layout/activity_main.xml                  # 横屏方向盘界面
-            ├── values/strings.xml / styles.xml / themes.xml
-            └── drawable/bg_direction.xml / bg_stop.xml   # 圆形按钮
-```
