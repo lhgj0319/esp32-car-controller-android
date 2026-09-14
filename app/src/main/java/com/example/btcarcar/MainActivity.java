@@ -96,23 +96,58 @@ public class MainActivity extends Activity {
         public void onReceive(Context context, Intent intent) {
             String action = intent.getAction();
             if (BluetoothDevice.ACTION_FOUND.equals(action)) {
-                BluetoothDevice device;
-                if (Build.VERSION.SDK_INT >= 33) {
-                    device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
-                } else {
-                    device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-                }
-                if (device != null && device.getName() != null && !mDiscovered.contains(device)) {
+                BluetoothDevice device = extractDevice(intent);
+                // 关键：不再要求 getName() 非空，新手机很多设备名字是异步返回的
+                if (device != null && !containsDevice(device)) {
                     mDiscovered.add(device);
-                    appendLog("发现设备: " + device.getName() + "  " + device.getAddress());
+                    appendLog("发现设备: " + deviceLabel(device));
+                } else if (device != null) {
+                    // 已在列表中，但这次拿到了名字，刷新日志
+                    if (device.getName() != null) {
+                        appendLog("设备更新: " + deviceLabel(device));
+                    }
                 }
+            } else if (BluetoothDevice.ACTION_NAME_CHANGED.equals(action)) {
+                BluetoothDevice device = extractDevice(intent);
+                if (device != null && !containsDevice(device)) {
+                    mDiscovered.add(device);
+                }
+                appendLog("设备名称更新: " + deviceLabel(device));
+            } else if (BluetoothAdapter.ACTION_DISCOVERY_STARTED.equals(action)) {
+                mDiscovering = true;
+                appendLog("正在搜索附近蓝牙设备…（请确保手机「位置信息」已开启）");
             } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action)) {
                 mDiscovering = false;
-                appendLog("搜索完成");
+                appendLog("搜索完成，共发现 " + mDiscovered.size() + " 个新设备");
                 showDeviceDialog();
             }
         }
     };
+
+    /** 从广播中安全取出 BluetoothDevice（兼容 Android 13+ 的新旧 API） */
+    private BluetoothDevice extractDevice(Intent intent) {
+        if (intent == null) return null;
+        if (Build.VERSION.SDK_INT >= 33) {
+            return intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
+        } else {
+            return intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+        }
+    }
+
+    /** 按 MAC 地址判断是否已收录（BluetoothDevice.equals 即按地址比较） */
+    private boolean containsDevice(BluetoothDevice device) {
+        for (BluetoothDevice d : mDiscovered) {
+            if (d.getAddress().equals(device.getAddress())) return true;
+        }
+        return false;
+    }
+
+    /** 统一设备显示文本：无名设备显示「未知设备」+ 地址，不再被过滤 */
+    private String deviceLabel(BluetoothDevice device) {
+        if (device == null) return "未知设备";
+        String name = device.getName();
+        return (name == null || name.isEmpty() ? "未知设备" : name) + "  " + device.getAddress();
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -145,6 +180,8 @@ public class MainActivity extends Activity {
 
         IntentFilter filter = new IntentFilter();
         filter.addAction(BluetoothDevice.ACTION_FOUND);
+        filter.addAction(BluetoothDevice.ACTION_NAME_CHANGED);
+        filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED);
         filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(mReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -258,8 +295,7 @@ public class MainActivity extends Activity {
         for (BluetoothDevice d : mDiscovered) {
             if (!devices.contains(d)) {
                 devices.add(d);
-                labels.add((d.getName() == null ? "未知设备" : d.getName())
-                        + "\n" + d.getAddress() + "（未配对）");
+                labels.add(deviceLabel(d) + "（未配对）");
             }
         }
         devices.add(null);
@@ -280,56 +316,155 @@ public class MainActivity extends Activity {
     }
 
     private void startDiscovery() {
-        if (mDiscovering || mAdapter == null || !mAdapter.isEnabled()) return;
+        if (mAdapter == null || !mAdapter.isEnabled()) return;
+        if (mDiscovering) {
+            appendLog("已经在搜索中，请稍候…");
+            return;
+        }
+        // 新手机上经典蓝牙搜索依赖系统定位开关，未开启会静默失败
+        if (!isLocationEnabled()) {
+            appendLog("⚠ 请先打开手机系统「位置信息 / GPS」开关，否则搜索不到蓝牙设备");
+            toast("请开启手机「位置信息」后再搜索");
+            try {
+                startActivity(new Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS));
+            } catch (Exception ignored) {
+            }
+            return;
+        }
         mDiscovered.clear();
         mDiscovering = true;
         appendLog("开始搜索附近蓝牙设备…");
-        mAdapter.startDiscovery();
+        boolean started = mAdapter.startDiscovery();
+        if (!started) {
+            mDiscovering = false;
+            appendLog("⚠ 搜索启动失败：请确认定位已开启、蓝牙已打开，并授予了蓝牙/定位权限");
+            toast("搜索启动失败，请检查定位与权限");
+        }
+    }
+
+    /** 判断系统定位服务是否开启 */
+    private boolean isLocationEnabled() {
+        try {
+            android.location.LocationManager lm =
+                    (android.location.LocationManager) getSystemService(Context.LOCATION_SERVICE);
+            if (lm == null) return true;
+            if (Build.VERSION.SDK_INT >= 28) {
+                return lm.isLocationEnabled();
+            }
+            return lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+                    || lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER);
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     /** 后台线程连接蓝牙串口 */
     private void connect(final BluetoothDevice device) {
         setConnecting(true);
+        // 连接前立即停止搜索：搜索与连接共用射频，不停会严重干扰连接
+        if (mAdapter != null && mAdapter.isDiscovering()) {
+            mAdapter.cancelDiscovery();
+        }
         new Thread(() -> {
-            BluetoothSocket socket = null;
-            try {
-                socket = device.createRfcommSocketToServiceRecord(SPP_UUID);
-                // 连接前停止搜索，避免拖慢连接
-                if (mAdapter != null && mAdapter.isDiscovering()) {
-                    mAdapter.cancelDiscovery();
-                }
-                socket.connect(); // 阻塞直到连接成功或失败
-                mSocket = socket;
-                mOut = socket.getOutputStream();
-                mIn = socket.getInputStream();
-                mConnected = true;
-                mUi.post(() -> {
-                    setConnecting(false);
-                    mDeviceText.setText("设备: " + (device.getName() == null ? "未知设备" : device.getName()));
-                    mStatusText.setText("已连接");
-                    mStatusText.setTextColor(0xFF2E9E5B);
-                    mConnectBtn.setText("断开连接");
-                    appendLog("== 已连接 " + device.getName() + " ==");
-                });
-                startReadLoop();
-            } catch (final Exception e) {
-                mConnected = false;
-                if (socket != null) {
-                    try {
-                        socket.close();
-                    } catch (IOException ignored) {
+            // 陌生（未配对）设备先触发系统配对，很多 ROM 上安全 socket 需要已配对才能连
+            if (device.getBondState() != BluetoothDevice.BOND_BONDED) {
+                mUi.post(() -> appendLog("设备未配对，正在请求配对…"));
+                try {
+                    device.createBond();
+                    int waited = 0;
+                    while (device.getBondState() != BluetoothDevice.BOND_BONDED && waited < 15000) {
+                        if (device.getBondState() == BluetoothDevice.BOND_NONE) break;
+                        Thread.sleep(300);
+                        waited += 300;
                     }
+                } catch (Exception e) {
+                    mUi.post(() -> appendLog("配对异常: " + e.getMessage()));
                 }
-                closeQuietly();
-                mUi.post(() -> {
-                    setConnecting(false);
-                    mStatusText.setText("未连接");
-                    mStatusText.setTextColor(0xFFD64545);
-                    mConnectBtn.setText("连接蓝牙");
-                    appendLog("连接失败: " + e.getMessage());
-                });
             }
+
+            BluetoothSocket socket = tryConnect(device);
+            if (socket != null) {
+                mSocket = socket;
+                try {
+                    mOut = socket.getOutputStream();
+                    mIn = socket.getInputStream();
+                    mConnected = true;
+                    mUi.post(() -> {
+                        setConnecting(false);
+                        mDeviceText.setText("设备: " + (device.getName() == null ? "未知设备" : device.getName()));
+                        mStatusText.setText("已连接");
+                        mStatusText.setTextColor(0xFF2E9E5B);
+                        mConnectBtn.setText("断开连接");
+                        appendLog("== 已连接 " + (device.getName() == null ? device.getAddress() : device.getName()) + " ==");
+                    });
+                    startReadLoop();
+                    return;
+                } catch (IOException e) {
+                    closeSocketQuietly(socket);
+                }
+            }
+
+            // 所有连接方式都失败
+            mConnected = false;
+            closeQuietly();
+            mUi.post(() -> {
+                setConnecting(false);
+                mStatusText.setText("未连接");
+                mStatusText.setTextColor(0xFFD64545);
+                mConnectBtn.setText("连接蓝牙");
+                appendLog("连接失败：已尝试安全/非安全/通道1 三种方式");
+            });
         }).start();
+    }
+
+    /**
+     * 多级降级连接：陌生设备用安全连接常失败，这里依次尝试
+     * 1) 安全 RFCOMM  2) 非安全 RFCOMM  3) 反射固定通道 1（HC-05/HC-06/ESP32 通用）
+     */
+    private BluetoothSocket tryConnect(BluetoothDevice device) {
+        // 1. 安全连接（已配对设备优先）
+        try {
+            BluetoothSocket socket = device.createRfcommSocketToServiceRecord(SPP_UUID);
+            socket.connect();
+            appendLogOnUiThread("安全连接成功");
+            return socket;
+        } catch (IOException e) {
+            appendLogOnUiThread("安全连接失败，尝试非安全连接…");
+        }
+
+        // 2. 非安全连接（陌生设备/无认证模块）
+        try {
+            BluetoothSocket socket = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
+            socket.connect();
+            appendLogOnUiThread("非安全连接成功");
+            return socket;
+        } catch (IOException e) {
+            appendLogOnUiThread("非安全连接失败，尝试反射通道1…");
+        }
+
+        // 3. 反射固定通道 1：绕过 SDP 查询，兼容大量串口蓝牙模块
+        try {
+            BluetoothSocket socket = (BluetoothSocket) device.getClass()
+                    .getMethod("createRfcommSocket", int.class)
+                    .invoke(device, 1);
+            socket.connect();
+            appendLogOnUiThread("反射通道1连接成功");
+            return socket;
+        } catch (Exception e) {
+            appendLogOnUiThread("反射通道1连接失败: " + e.getMessage());
+        }
+        return null;
+    }
+
+    private void appendLogOnUiThread(String line) {
+        mUi.post(() -> appendLog(line));
+    }
+
+    private void closeSocketQuietly(BluetoothSocket socket) {
+        try {
+            if (socket != null) socket.close();
+        } catch (IOException ignored) {
+        }
     }
 
     /** 后台线程循环读取小车返回的数据 */
