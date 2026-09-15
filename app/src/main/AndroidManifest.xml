@@ -8,14 +8,18 @@
     <uses-permission
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
-    <!-- Android 12+ 的蓝牙扫描 / 连接权限（运行时动态申请） -->
-    <uses-permission
-        android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <!-- Android 6~11 搜索蓝牙设备需要定位权限 -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
+    <!-- 定位权限：Android 12+ 上 BLUETOOTH_SCAN 没有 neverForLocation 时，
+         startDiscovery 仍然需要定位权限才能收到 ACTION_FOUND，
+         因此不能再限制 maxSdkVersion="30" -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Android 12+ 新蓝牙权限：不加 neverForLocation，配合上面的定位权限使用 -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- 语音识别 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <queries>

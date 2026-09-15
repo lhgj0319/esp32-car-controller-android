@@ -89,6 +89,7 @@ public class MainActivity extends Activity {
 
     private final List<BluetoothDevice> mDiscovered = new ArrayList<>();
     private boolean mDiscovering;
+    private AlertDialog mDeviceDialog;
 
     /** 蓝牙搜索广播接收器 */
     private final BroadcastReceiver mReceiver = new BroadcastReceiver() {
@@ -97,15 +98,13 @@ public class MainActivity extends Activity {
             String action = intent.getAction();
             if (BluetoothDevice.ACTION_FOUND.equals(action)) {
                 BluetoothDevice device = extractDevice(intent);
-                // 关键：不再要求 getName() 非空，新手机很多设备名字是异步返回的
                 if (device != null && !containsDevice(device)) {
                     mDiscovered.add(device);
                     appendLog("发现设备: " + deviceLabel(device));
-                } else if (device != null) {
-                    // 已在列表中，但这次拿到了名字，刷新日志
-                    if (device.getName() != null) {
-                        appendLog("设备更新: " + deviceLabel(device));
-                    }
+                    refreshDeviceDialog();
+                } else if (device != null && device.getName() != null) {
+                    appendLog("设备更新: " + deviceLabel(device));
+                    refreshDeviceDialog();
                 }
             } else if (BluetoothDevice.ACTION_NAME_CHANGED.equals(action)) {
                 BluetoothDevice device = extractDevice(intent);
@@ -113,13 +112,14 @@ public class MainActivity extends Activity {
                     mDiscovered.add(device);
                 }
                 appendLog("设备名称更新: " + deviceLabel(device));
+                refreshDeviceDialog();
             } else if (BluetoothAdapter.ACTION_DISCOVERY_STARTED.equals(action)) {
                 mDiscovering = true;
                 appendLog("正在搜索附近蓝牙设备…（请确保手机「位置信息」已开启）");
             } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action)) {
                 mDiscovering = false;
                 appendLog("搜索完成，共发现 " + mDiscovered.size() + " 个新设备");
-                showDeviceDialog();
+                refreshDeviceDialog();
             }
         }
     };
@@ -183,8 +183,10 @@ public class MainActivity extends Activity {
         filter.addAction(BluetoothDevice.ACTION_NAME_CHANGED);
         filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED);
         filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
+        // 系统广播（ACTION_FOUND 等）的发送方是系统进程，
+        // Android 14+ 上 RECEIVER_NOT_EXPORTED 会拦截外部广播，必须用 RECEIVER_EXPORTED
         if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(mReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(mReceiver, filter, Context.RECEIVER_EXPORTED);
         } else {
             registerReceiver(mReceiver, filter);
         }
@@ -238,6 +240,12 @@ public class MainActivity extends Activity {
                     != PackageManager.PERMISSION_GRANTED) {
                 need.add(Manifest.permission.BLUETOOTH_SCAN);
             }
+            // 关键：BLUETOOTH_SCAN 没有 neverForLocation 时，
+            // startDiscovery 在 Android 12+ 上仍然需要定位权限才能收到 ACTION_FOUND
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                    != PackageManager.PERMISSION_GRANTED) {
+                need.add(Manifest.permission.ACCESS_FINE_LOCATION);
+            }
         } else if (Build.VERSION.SDK_INT >= 23) {
             // Android 6~11：搜索蓝牙设备需要定位权限
             if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -245,7 +253,11 @@ public class MainActivity extends Activity {
                 need.add(Manifest.permission.ACCESS_FINE_LOCATION);
             }
         }
-        if (need.isEmpty()) return true;
+        if (need.isEmpty()) {
+            appendLog("权限检查通过");
+            return true;
+        }
+        appendLog("申请权限: " + need);
         requestPermissions(need.toArray(new String[0]), REQUEST_PERMISSIONS);
         return false;
     }
@@ -279,9 +291,27 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 弹出设备选择列表：已配对设备 + 搜索到的新设备 + 搜索入口 */
+    /** 弹出/刷新设备选择列表：已配对 + 已发现 + 搜索入口 */
     private void showDeviceDialog() {
         if (mAdapter == null) return;
+        if (mDeviceDialog != null && mDeviceDialog.isShowing()) {
+            refreshDeviceDialog();
+            return;
+        }
+        mDeviceDialog = buildDeviceDialog();
+        mDeviceDialog.show();
+    }
+
+    private void refreshDeviceDialog() {
+        if (mDeviceDialog != null && mDeviceDialog.isShowing()) {
+            AlertDialog fresh = buildDeviceDialog();
+            mDeviceDialog.dismiss();
+            mDeviceDialog = fresh;
+            mDeviceDialog.show();
+        }
+    }
+
+    private AlertDialog buildDeviceDialog() {
         final List<BluetoothDevice> devices = new ArrayList<>();
         final List<String> labels = new ArrayList<>();
 
@@ -289,37 +319,56 @@ public class MainActivity extends Activity {
         if (bonded != null) {
             for (BluetoothDevice d : bonded) {
                 devices.add(d);
-                labels.add((d.getName() == null ? "未知设备" : d.getName()) + "\n" + d.getAddress());
+                labels.add((d.getName() == null ? "未知设备" : d.getName()) + "\n" + d.getAddress() + "（已配对）");
             }
         }
         for (BluetoothDevice d : mDiscovered) {
-            if (!devices.contains(d)) {
+            boolean already = false;
+            for (BluetoothDevice b : devices) {
+                if (b != null && b.getAddress().equals(d.getAddress())) { already = true; break; }
+            }
+            if (!already) {
                 devices.add(d);
                 labels.add(deviceLabel(d) + "（未配对）");
             }
         }
         devices.add(null);
-        labels.add("🔍 搜索新设备…");
+        labels.add(mDiscovering ? "⏳ 正在搜索新设备…" : "🔍 搜索新设备…");
 
-        new AlertDialog.Builder(this)
+        return new AlertDialog.Builder(this)
                 .setTitle("选择蓝牙设备")
                 .setItems(labels.toArray(new String[0]), (dialog, which) -> {
                     BluetoothDevice dev = devices.get(which);
                     if (dev == null) {
                         startDiscovery();
+                        // 保持对话框打开，边搜边刷新
+                        mUi.postDelayed(this::showDeviceDialog, 300);
                     } else {
+                        if (mDeviceDialog != null) mDeviceDialog.dismiss();
                         connect(dev);
                     }
                 })
-                .setNegativeButton("取消", null)
-                .show();
+                .setNegativeButton("关闭", (d, w) -> {
+                    if (mAdapter != null && mAdapter.isDiscovering()) mAdapter.cancelDiscovery();
+                })
+                .create();
     }
 
     private void startDiscovery() {
-        if (mAdapter == null || !mAdapter.isEnabled()) return;
+        if (mAdapter == null || !mAdapter.isEnabled()) {
+            appendLog("⚠ 蓝牙未开启");
+            return;
+        }
         if (mDiscovering) {
             appendLog("已经在搜索中，请稍候…");
             return;
+        }
+        // 打印当前权限状态，方便诊断
+        if (Build.VERSION.SDK_INT >= 31) {
+            appendLog("权限状态 SCAN=" + checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
+                    + " CONNECT=" + checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                    + " LOC=" + checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                    + "（0=已授权）");
         }
         // 新手机上经典蓝牙搜索依赖系统定位开关，未开启会静默失败
         if (!isLocationEnabled()) {
@@ -335,6 +384,7 @@ public class MainActivity extends Activity {
         mDiscovering = true;
         appendLog("开始搜索附近蓝牙设备…");
         boolean started = mAdapter.startDiscovery();
+        appendLog("startDiscovery() 返回: " + started);
         if (!started) {
             mDiscovering = false;
             appendLog("⚠ 搜索启动失败：请确认定位已开启、蓝牙已打开，并授予了蓝牙/定位权限");
@@ -687,6 +737,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (mDeviceDialog != null && mDeviceDialog.isShowing()) {
+            try { mDeviceDialog.dismiss(); } catch (Exception ignored) {}
+        }
+        mDeviceDialog = null;
         stopOfflineListening();
         if (mVoskRecognizer != null) {
             mVoskRecognizer.close();
