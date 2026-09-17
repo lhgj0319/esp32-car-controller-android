@@ -53,10 +53,10 @@ public class MainActivity extends Activity {
     private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
     /** ── 指令字：按你的小车固件修改这里即可 ── */
-    private static final String CMD_FORWARD = "F";
-    private static final String CMD_BACKWARD = "B";
-    private static final String CMD_LEFT = "L";
-    private static final String CMD_RIGHT = "R";
+    private static final String CMD_FORWARD = "L";
+    private static final String CMD_BACKWARD = "R";
+    private static final String CMD_LEFT = "F";
+    private static final String CMD_RIGHT = "B";
     private static final String CMD_STOP = "S";
 
     /** 按住按键时的连发间隔（毫秒） */
